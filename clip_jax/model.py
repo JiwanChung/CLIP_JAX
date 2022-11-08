@@ -13,7 +13,7 @@ class PositionalEmbedding(hk.Module):
         super().__init__(name="pos_e")
         self.positional_embedding = hk.get_parameter("pos_embd", (spacial_dim ** 2 + 1, embed_dim), init=hk.initializers.RandomNormal())
     def __call__(self, x):
-        return x + self.positional_embedding[:, None, :]
+        return x + self.positional_embedding[:, None, :].astype(x.dtype)
 
 class AttentionPool2d(hk.Module):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
@@ -89,8 +89,9 @@ class ModifiedResNet(hk.Module):
     - The final pooling layer is a QKV attention instead of an average pool
     """
 
-    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64, name=None):
+    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64, name=None, dtype=jnp.float32):
         super().__init__(name="visual")
+        self.dtype = dtype
         self.output_dim = output_dim
         self.input_resolution = input_resolution
 
@@ -148,7 +149,7 @@ class ModifiedResNet(hk.Module):
             x = self.avgpool(x)
             return x
 
-        #x = x.type(self.conv1.weight.dtype)
+        x = x.astype(self.dtype)
         x = stem(x)
         x = self.layer1(x)
         x = self.layer2(x)
@@ -255,7 +256,7 @@ class Transformer(hk.Module):
 
 class VisualTransformer(hk.Module):
     def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int,
-                 name: str):
+                 name: str, dtype: jnp.dtype = jnp.float32, dtype_full: jnp.dtype = jnp.float32):
         super().__init__(name=name)
 
         self.input_resolution = input_resolution
@@ -279,17 +280,21 @@ class VisualTransformer(hk.Module):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.transpose((0, 2, 1))  # shape = [*, grid ** 2, width]
-        x = jnp.concatenate([self.class_embedding + jnp.zeros((x.shape[0], 1, x.shape[-1]), dtype=x.dtype), x],
+        x = jnp.concatenate([self.class_embedding.astype(x.dtype) + jnp.zeros((x.shape[0], 1, x.shape[-1]), dtype=x.dtype), x],
                             axis=1)  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding
+        x = x + self.positional_embedding.astype(x.dtype)
 
+        x = x.astype(self.dtype_full)
         x = self.ln_pre(x)
+        x = x.astype(self.dtype)
         x = x.transpose((1, 0, 2))  # NLD -> LND
 
         x = self.transformer(x)
         x = x.transpose((1, 0, 2))  # LND -> NLD
 
+        x = x.astype(self.dtype_full)
         x = self.ln_post(x[:, 0, :])
+        x = x.astype(self.dtype)
 
         if self.proj is not None:
             x = x @ self.proj
@@ -311,7 +316,9 @@ class CLIP(hk.Module):
                  vocab_size: int,
                  transformer_width: int,
                  transformer_heads: int,
-                 transformer_layers: int
+                 transformer_layers: int,
+                 dtype: jnp.dtype = jnp.float32,
+                 dtype_full: jnp.dtype = jnp.float32,
                  ):
         super().__init__()
 
@@ -326,7 +333,8 @@ class CLIP(hk.Module):
                 output_dim=embed_dim,
                 heads=vision_heads,
                 input_resolution=image_resolution,
-                width=vision_width
+                width=vision_width,
+                dtype=dtype
             )
         else:
             vision_heads = vision_width // 64
@@ -337,7 +345,9 @@ class CLIP(hk.Module):
                 layers=vision_layers,
                 heads=vision_heads,
                 output_dim=embed_dim,
-                name="visual"
+                name="visual",
+                dtype=dtype,
+                dtype_full=dtype_full
             )
 
         self.transformer = Transformer(
